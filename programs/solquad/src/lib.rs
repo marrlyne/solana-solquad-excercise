@@ -32,6 +32,8 @@ pub mod solquad {
         project_account.votes_count = 0;
         project_account.voter_amount = 0;
         project_account.distributed_amt = 0;
+        project_account.is_in_pool = false; 
+        project_account.pool_account = None;
 
         Ok(())
     }
@@ -41,6 +43,18 @@ pub mod solquad {
         let pool_account = &mut ctx.accounts.pool_account;
         let project_account = &ctx.accounts.project_account;
 
+         // Check if the project is already in a pool
+        if project_account.is_in_pool {
+            return Err(ErrorCode::ProjectAlreadyInPool.into());
+        }
+
+            // Check if the project is associated with a different pool
+        if let Some(existing_pool) = project_account.pool_account {
+            if existing_pool != *pool_account.to_account_info().key {
+                return Err(ErrorCode::ProjectInDifferentPool.into());
+            }
+        }
+
         pool_account.projects.push(
             project_account.project_owner
         );
@@ -49,6 +63,8 @@ pub mod solquad {
         escrow_account.project_reciever_addresses.push(
             project_account.project_owner
         );
+        project_account.is_in_pool = true;
+        project_account.pool_account = Some(*pool_account.to_account_info().key);
 
         Ok(())
     }
@@ -72,32 +88,29 @@ pub mod solquad {
     pub fn distribute_escrow_amount(ctx: Context<DistributeEscrowAmount>) -> Result<()> {
         let escrow_account = &mut ctx.accounts.escrow_account;
         let pool_account = &mut ctx.accounts.pool_account;
-        let project_account = &mut ctx.accounts.project_account;
-  
-        for i in 0..escrow_account.project_reciever_addresses.len() {
-            let distributable_amt: u64;
-            let votes: u64;
-
-            let project = pool_account.projects[i];
-            if project == project_account.project_owner {
-                votes = project_account.votes_count;
-            } else {
-                votes = 0;
-            }
-
-            if votes != 0 {
-                distributable_amt = (votes / pool_account.total_votes) * escrow_account.creator_deposit_amount as u64;
-            } else {
-                distributable_amt = 0;
-            }
-
-            project_account.distributed_amt = distributable_amt;
+    
+        // Reset the distributed amount for all projects in the pool
+        for project in pool_account.projects.iter() {
+            let mut project_account: Account<Project> = Account::load(project.clone(), &ctx.accounts)?;
+            project_account.distributed_amt = 0;
         }
-
+    
+        for project in pool_account.projects.iter() {
+            let mut project_account: Account<Project> = Account::load(project.clone(), &ctx.accounts)?;
+            let votes = project_account.votes_count;
+    
+            if votes != 0 {
+                let percentage = votes.checked_div(pool_account.total_votes).ok_or(ErrorCode::Overflow)?;
+                let distributable_amt = percentage.checked_mul(escrow_account.creator_deposit_amount).ok_or(ErrorCode::Overflow)?;
+                project_account.distributed_amt = distributable_amt;
+            }
+        }
+    
         Ok(())
     }
+    
+    
 }
-
 #[derive(Accounts)]
 pub struct InitializeEscrow<'info> {
     #[account(
@@ -202,6 +215,8 @@ pub struct Project {
     pub votes_count: u64,
     pub voter_amount: u64,
     pub distributed_amt: u64,
+    pub is_in_pool: bool,
+    pub pool_account: Option<Pubkey>
 }
 
 // Voters voting for the project
@@ -211,3 +226,14 @@ pub struct Voter {
     pub voted_for: Pubkey,
     pub token_amount: u64
 }
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Project is already in a pool.")]
+    ProjectAlreadyInPool,
+    #[msg("Project is associated with a different pool.")]
+    ProjectInDifferentPool,
+    #[msg("Overflow error.")]
+    Overflow,
+}
+
